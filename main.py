@@ -4,7 +4,9 @@ import itertools
 class CFGtoCNF:
     def __init__(self, start_symbol, productions):
         self.start = start_symbol
-        self.p = productions  # Dictionary format: {'S': ['abAB'], ...}
+        # Превращаем строки в списки токенов: 'abAB' -> ['a', 'b', 'A', 'B']
+        self.p = {nt: [list(rule) if rule != 'eps' else [] for rule in rules]
+                  for nt, rules in productions.items()}
         self.new_var_counter = 1
 
     def normalize(self):
@@ -13,8 +15,8 @@ class CFGtoCNF:
 
         self.eliminate_epsilon()
         self.eliminate_unit()
-        self.eliminate_inaccessible()
         self.eliminate_non_productive()
+        self.eliminate_inaccessible()
         self.convert_to_cnf()
 
         print("\n--- Final Chomsky Normal Form ---")
@@ -22,77 +24,63 @@ class CFGtoCNF:
         return self.p
 
     def eliminate_epsilon(self):
-        # 1. Find nullable variables
-        nullables = set(nt for nt, rules in self.p.items() if 'eps' in rules)
+        nullables = set(nt for nt, rules in self.p.items() if [] in rules)
 
-        # 2. Add rules without nullables
-        new_p = {nt: set(rules) for nt, rules in self.p.items()}
-        for nt in new_p:
-            new_p[nt].discard('eps')
+        new_p = {nt: [r for r in rules if r != []] for nt, rules in self.p.items()}
 
         for nt, rules in self.p.items():
             for rule in rules:
-                if rule == 'eps': continue
-                # Find positions of nullable variables in the rule
-                nullable_indices = [i for i, char in enumerate(rule) if char in nullables]
-                if not nullable_indices: continue
-
-                # Generate all combinations of removing nullable variables
-                for r in range(1, len(nullable_indices) + 1):
-                    for combo in itertools.combinations(nullable_indices, r):
-                        new_rule = "".join([char for i, char in enumerate(rule) if i not in combo])
-                        if new_rule:  # avoid adding empty string if not intended
-                            new_p[nt].add(new_rule)
-
-        self.p = {nt: list(rules) for nt, rules in new_p.items()}
+                if not rule: continue
+                indices = [i for i, sym in enumerate(rule) if sym in nullables]
+                for r in range(1, len(indices) + 1):
+                    for combo in itertools.combinations(indices, r):
+                        # Создаем новую комбинацию без nullable символов
+                        new_rule = [sym for i, sym in enumerate(rule) if i not in combo]
+                        if new_rule and new_rule not in new_p[nt]:
+                            new_p[nt].append(new_rule)
+        self.p = new_p
 
     def eliminate_unit(self):
-        # Keep resolving A -> B until no changes
         changed = True
         while changed:
             changed = False
-            new_p = {nt: set(rules) for nt, rules in self.p.items()}
-            for nt, rules in self.p.items():
-                for rule in rules:
-                    if len(rule) == 1 and rule.isupper():  # It's a unit production
-                        new_p[nt].remove(rule)
-                        if rule in self.p:
-                            for sub_rule in self.p[rule]:
-                                if sub_rule not in new_p[nt]:
-                                    new_p[nt].add(sub_rule)
+            for nt in list(self.p.keys()):
+                for rule in self.p[nt]:
+                    if len(rule) == 1 and rule[0].isupper():  # Unit production
+                        unit_target = rule[0]
+                        self.p[nt].remove(rule)
+                        if unit_target in self.p:
+                            for target_rule in self.p[unit_target]:
+                                if target_rule not in self.p[nt]:
+                                    self.p[nt].append(target_rule)
                                     changed = True
-            self.p = {nt: list(rules) for nt, rules in new_p.items()}
+                        break  # Начинаем заново после изменения
 
     def eliminate_inaccessible(self):
-        accessible = set([self.start])
+        accessible = {self.start}
         queue = [self.start]
-
         while queue:
-            current = queue.pop(0)
-            if current not in self.p: continue
-            for rule in self.p[current]:
-                for char in rule:
-                    if char.isupper() and char not in accessible:
-                        accessible.add(char)
-                        queue.append(char)
-
+            curr = queue.pop(0)
+            if curr in self.p:
+                for rule in self.p[curr]:
+                    for sym in rule:
+                        if sym.isupper() and sym not in accessible:
+                            accessible.add(sym)
+                            queue.append(sym)
         self.p = {nt: rules for nt, rules in self.p.items() if nt in accessible}
 
     def eliminate_non_productive(self):
         productive = set()
         changed = True
-
         while changed:
             changed = False
             for nt, rules in self.p.items():
                 if nt in productive: continue
                 for rule in rules:
-                    # A rule is productive if all its symbols are terminals or productive non-terminals
-                    if all((char.islower() or char in productive) for char in rule):
+                    if all(not sym.isupper() or sym in productive for sym in rule):
                         productive.add(nt)
                         changed = True
                         break
-
         self.p = {nt: rules for nt, rules in self.p.items() if nt in productive}
 
     def _get_new_var(self):
@@ -101,57 +89,57 @@ class CFGtoCNF:
         return var
 
     def convert_to_cnf(self):
-        new_p = {}
-        terminals_map = {}  # Maps 'a' to 'X', 'b' to 'Y'
+        term_map = {}
+        final_p = {}
 
-        # Step A: Replace terminals in long rules
-        temp_p = {}
+        # 1. Заменяем терминалы в длинных правилах
         for nt, rules in self.p.items():
-            temp_p[nt] = []
+            new_rules = []
             for rule in rules:
-                if len(rule) == 1 and rule.islower():
-                    temp_p[nt].append(rule)
+                if len(rule) <= 1:
+                    new_rules.append(rule)
                 else:
-                    new_rule = ""
-                    for char in rule:
-                        if char.islower():
-                            if char not in terminals_map:
-                                new_nt = 'X' if char == 'a' else 'Y'
-                                terminals_map[char] = new_nt
-                                new_p[new_nt] = [char]
-                            new_rule += terminals_map[char]
+                    processed_rule = []
+                    for sym in rule:
+                        if not sym.isupper():  # Это терминал
+                            if sym not in term_map:
+                                new_v = f"T{sym.upper()}"
+                                term_map[sym] = new_v
+                                final_p[new_v] = [[sym]]
+                            processed_rule.append(term_map[sym])
                         else:
-                            new_rule += char
-                    temp_p[nt].append(new_rule)
+                            processed_rule.append(sym)
+                    new_rules.append(processed_rule)
+            final_p[nt] = new_rules
 
-        # Step B: Break rules longer than 2 non-terminals
-        final_p = dict(new_p)
-        for nt, rules in temp_p.items():
-            final_p[nt] = []
-            for rule in rules:
-                while len(rule) > 2:
-                    first_two = rule[:2]
-                    # Check if we already have a variable for this pair
-                    new_var = None
-                    for k, v in final_p.items():
-                        if v == [first_two] and k.startswith('Z'):
-                            new_var = k
-                            break
-                    if not new_var:
-                        new_var = self._get_new_var()
-                        final_p[new_var] = [first_two]
-                    rule = new_var + rule[2:]
-                final_p[nt].append(rule)
+        # 2. Бинаризация (разбиение правил длиннее 2)
+        changed = True
+        while changed:
+            changed = False
+            for nt in list(final_p.keys()):
+                new_rules = []
+                for rule in final_p[nt]:
+                    if len(rule) > 2:
+                        new_v = self._get_new_var()
+                        first_two = rule[:2]
+                        rest = rule[2:]
+
+                        final_p[new_v] = [first_two]
+                        new_rules.append([new_v] + rest)
+                        changed = True
+                    else:
+                        new_rules.append(rule)
+                final_p[nt] = new_rules
 
         self.p = final_p
 
     def print_grammar(self):
         for nt, rules in self.p.items():
-            print(f"{nt} -> {' | '.join(rules)}")
+            formatted_rules = [''.join(r) if r else 'eps' for r in rules]
+            print(f"{nt} -> {' | '.join(formatted_rules)}")
 
 
 if __name__ == "__main__":
-    # VARIANT 16
     productions = {
         'S': ['abAB'],
         'A': ['aSab', 'BS', 'aA', 'b'],
